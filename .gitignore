@@ -1,0 +1,11 @@
+*.dot
+*.pyc
+log
+
+*.pdf
+test*
+*.s
+
+out
+.idea
+*.log
