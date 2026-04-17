@@ -164,6 +164,40 @@ class Parser:
             self.expect('dosym')
             body = self.statement(symtab)
             return ir.WhileStat(cond=cond, body=body, symtab=symtab)
+        elif self.accept('forsym'):
+            self.expect('ident')
+            loop_var = symtab.find(self.value)
+            self.expect('fromsym')
+            init_expr = self.expression(symtab)
+            self.expect('tosym')
+            limit_expr = self.expression(symtab)
+            self.expect('dosym')
+            body = self.statement(symtab)
+            init = ir.AssignStat(
+                target=loop_var,
+                offset=None,
+                expr=init_expr,
+                symtab=symtab
+            )
+            cond = ir.BinExpr(
+                children=['leq', ir.Var(var=loop_var, symtab=symtab), limit_expr],
+                symtab=symtab)
+            increment = ir.AssignStat(
+                target=loop_var,
+                offset=None,
+                expr=ir.BinExpr(
+                    children=[
+                        'plus',
+                        ir.Var(var=loop_var, symtab=symtab),
+                        ir.Const(value=1, symtab=symtab)
+                    ],
+                    symtab=symtab
+                ),
+                symtab=symtab
+            )
+            loop_body = ir.StatList(children=[body, increment], symtab=symtab)
+            while_stat = ir.WhileStat(cond=cond, body=loop_body, symtab=symtab)
+            return ir.StatList(children=[init, while_stat], symtab=symtab)
         elif self.accept('print'):
             exp = self.expression(symtab)
             return ir.PrintStat(exp=exp, symtab=symtab)
