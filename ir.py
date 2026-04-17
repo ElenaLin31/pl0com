@@ -185,7 +185,7 @@ class IRNode:  # abstract
         except Exception:
             pass
 
-        attrs = {'body', 'cond', 'value', 'thenpart', 'elsepart', 'symbol', 'call', 'step', 'expr', 'target', 'defs',
+        attrs = {'body', 'cond', 'init', 'value', 'thenpart', 'elsepart', 'symbol', 'call', 'step', 'expr', 'target', 'defs',
                  'global_symtab', 'local_symtab', 'offset'} & set(dir(self))
 
         res = repr(type(self)) + ' ' + repr(id(self)) + ' {\n'
@@ -213,7 +213,7 @@ class IRNode:  # abstract
         return res
 
     def navigate(self, action):
-        attrs = {'body', 'cond', 'value', 'thenpart', 'elsepart', 'symbol', 'call', 'step', 'expr', 'target', 'defs',
+        attrs = {'body', 'cond', 'init', 'value', 'thenpart', 'elsepart', 'symbol', 'call', 'step', 'expr', 'target', 'defs',
                  'global_symtab', 'local_symtab', 'offset'} & set(dir(self))
         if 'children' in dir(self) and len(self.children):
             print('navigating children of', type(self), id(self), len(self.children))
@@ -235,7 +235,7 @@ class IRNode:  # abstract
         if 'children' in dir(self) and len(self.children) and old in self.children:
             self.children[self.children.index(old)] = new
             return True
-        attrs = {'body', 'cond', 'value', 'thenpart', 'elsepart', 'symbol', 'call', 'step', 'expr', 'target', 'defs',
+        attrs = {'body', 'cond', 'init', 'value', 'thenpart', 'elsepart', 'symbol', 'call', 'step', 'expr', 'target', 'defs',
                  'global_symtab', 'local_symtab', 'offset'} & set(dir(self))
         for d in attrs:
             try:
@@ -488,7 +488,41 @@ class ForStat(Stat):  # incomplete
         self.cond.parent = self
         self.step.parent = self
         self.body.parent = self
-
+    def lower(self):
+        entry_label = TYPENAMES['label']()
+        exit_label = TYPENAMES['label']()
+        #挂上label，label必须在某个node上，所以用EmptyStat
+        exit_stat = EmptyStat(symtab=self.symtab)
+        exit_stat.set_label(exit_label)
+        #cond放到entry
+        self.cond.set_label(entry_label)
+        branch_to_exit = BranchStat(
+            cond=self.cond.destination(),
+            target=exit_label,
+            symtab=self.symtab,
+            negcond=True
+        )
+        loop_back = BranchStat(
+            cond=None,
+            target=entry_label,
+            symtab=self.symtab
+        )
+        loop_body = StatList(
+            children=[self.body, self.step],
+            symtab=self.symtab
+        )
+        stat_list = StatList(
+            parent=self.parent,
+            children=[
+                self.init,
+                self.cond,
+                branch_to_exit,
+                loop_body,
+                loop_back,
+                exit_stat],
+            symtab=self.symtab
+        )
+        return self.parent.replace(self, stat_list)
 
 class AssignStat(Stat):
     def __init__(self, parent=None, target=None, offset=None, expr=None, symtab=None):

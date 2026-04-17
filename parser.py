@@ -182,7 +182,7 @@ class Parser:
             cond = ir.BinExpr(
                 children=['leq', ir.Var(var=loop_var, symtab=symtab), limit_expr],
                 symtab=symtab)
-            increment = ir.AssignStat(
+            step = ir.AssignStat(
                 target=loop_var,
                 offset=None,
                 expr=ir.BinExpr(
@@ -195,9 +195,7 @@ class Parser:
                 ),
                 symtab=symtab
             )
-            loop_body = ir.StatList(children=[body, increment], symtab=symtab)
-            while_stat = ir.WhileStat(cond=cond, body=loop_body, symtab=symtab)
-            return ir.StatList(children=[init, while_stat], symtab=symtab)
+            return ir.ForStat(init=init, cond=cond, step=step, body=body, symtab=symtab)
         elif self.accept('print'):
             exp = self.expression(symtab)
             return ir.PrintStat(exp=exp, symtab=symtab)
