@@ -1,0 +1,6 @@
+var i;
+
+begin
+    for i from 1 to 3 do
+        print i
+    end.

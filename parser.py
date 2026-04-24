@@ -180,7 +180,7 @@ class Parser:
                 symtab=symtab
             )
             cond = ir.BinExpr(
-                children=['leq', ir.Var(var=loop_var, symtab=symtab), limit_expr],
+                children=['lss', ir.Var(var=loop_var, symtab=symtab), limit_expr],
                 symtab=symtab)
             step = ir.AssignStat(
                 target=loop_var,
@@ -195,7 +195,7 @@ class Parser:
                 ),
                 symtab=symtab
             )
-            return ir.ForStat(init=init, cond=cond, step=step, body=body, symtab=symtab)
+            return ir.ForStat(init=init, cond=cond, step=step, body=body, loop_var=loop_var, limit_expr=limit_expr, symtab=symtab)
         elif self.accept('print'):
             exp = self.expression(symtab)
             return ir.PrintStat(exp=exp, symtab=symtab)

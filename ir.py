@@ -7,7 +7,6 @@ have a lowering function or a code generation function (codegen functions are
 in a separate module though)."""
 
 from codegenhelp import *
-
 # UTILITIES
 
 tempcount = 0
@@ -478,7 +477,7 @@ class WhileStat(Stat):
 
 
 class ForStat(Stat):  # incomplete
-    def __init__(self, parent=None, init=None, cond=None, step=None, body=None, symtab=None):
+    def __init__(self, parent=None, init=None, cond=None, step=None, body=None, loop_var=None, limit_expr=None, symtab=None):
         super().__init__(parent, [], symtab)
         self.init = init
         self.cond = cond
@@ -488,6 +487,9 @@ class ForStat(Stat):  # incomplete
         self.cond.parent = self
         self.step.parent = self
         self.body.parent = self
+        self.loop_var = loop_var
+        self.limit_expr = limit_expr
+
     def lower(self):
         entry_label = TYPENAMES['label']()
         exit_label = TYPENAMES['label']()
@@ -507,10 +509,7 @@ class ForStat(Stat):  # incomplete
             target=entry_label,
             symtab=self.symtab
         )
-        loop_body = StatList(
-            children=[self.body, self.step],
-            symtab=self.symtab
-        )
+        loop_body = self.body
         stat_list = StatList(
             parent=self.parent,
             children=[
@@ -523,6 +522,45 @@ class ForStat(Stat):  # incomplete
             symtab=self.symtab
         )
         return self.parent.replace(self, stat_list)
+
+def unrolling(node):
+    #只遇到ForStat才处理
+    if isinstance(node, ForStat):
+        body1 = node.body
+        step1 = node.step
+        body2 = PrintStat(
+            exp=Var(var=node.loop_var, symtab=node.symtab),
+            symtab=node.symtab
+        )
+        step2 = AssignStat(
+            target=node.loop_var,
+            offset=None,
+            expr=BinExpr(
+                children=['plus', Var(var=node.loop_var, symtab=node.symtab), Const(value=1, symtab=node.symtab)],
+                symtab=node.symtab
+            ),
+            symtab=node.symtab
+        )
+        limit2 = Const(value=node.limit_expr.value, symtab=node.symtab)
+        cond2 = BinExpr(
+            children = ['lss', Var(var=node.loop_var, symtab=node.symtab), limit2], symtab=node.symtab
+        )
+        second_part = StatList(
+            children = [body2, step2], symtab = node.symtab
+        )
+        guarded_second = IfStat(
+            cond = cond2,
+            thenpart = second_part,
+            elsepart = None,
+            symtab = node.symtab
+        )
+        new_body = StatList(
+            children = [body1, step1, guarded_second], symtab = node.symtab
+        )
+        #把原来的循环体换成新的循环体
+        node.body = new_body
+        #修正树结构
+        new_body.parent = node
 
 class AssignStat(Stat):
     def __init__(self, parent=None, target=None, offset=None, expr=None, symtab=None):
