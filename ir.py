@@ -487,6 +487,7 @@ class ForStat(Stat):  # incomplete
         self.cond.parent = self
         self.step.parent = self
         self.body.parent = self
+
         self.loop_var = loop_var
         self.limit_expr = limit_expr
 
@@ -509,14 +510,16 @@ class ForStat(Stat):  # incomplete
             target=entry_label,
             symtab=self.symtab
         )
-        loop_body = self.body
+        #loop_body=self.body
         stat_list = StatList(
             parent=self.parent,
             children=[
                 self.init,
                 self.cond,
                 branch_to_exit,
-                loop_body,
+                #loop_body
+                self.body,
+                self.step,
                 loop_back,
                 exit_stat],
             symtab=self.symtab
@@ -561,6 +564,143 @@ def unrolling(node):
         node.body = new_body
         #修正树结构
         new_body.parent = node
+
+def replace_var(node, old_sym, new_sym):
+    def action(n):
+        #if it is a Var node and if it is equal to the old symbol then replace it
+        if isinstance(n, Var):
+            if n.symbol is old_sym:
+                n.symbol = new_sym
+    node.navigate(action)
+
+#从当前 IR node 一路往 parent 往上爬，直到找到“包住它的 Block”。
+def get_enclosing_block(node):
+    while node is not None and not isinstance(node, Block):
+        node = node.parent
+    return node
+
+def loopTiling(node):
+
+    if isinstance(node, ForStat):
+        print("loopTiling start")
+        j=node.loop_var
+
+        block = get_enclosing_block(node)
+        #auto int counter_e
+        e = Symbol(
+            name='counter_e',
+            stype=TYPENAMES['int'],
+            alloct='auto'
+        )
+        #for datalayout, regalloc
+        block.symtab.append(e)
+        if node.symtab is not block.symtab:
+            node.symtab.append(e)
+
+        #auto int counter_idx
+        idx = Symbol(
+            name='counter_idx',
+            stype=TYPENAMES['int'],
+            alloct='auto'
+        )
+        block.symtab.append(idx)
+        if node.symtab is not block.symtab:
+            node.symtab.append(idx)
+
+        #idx=j+e
+        idx_assign = AssignStat(
+            target=idx,
+            offset=None,
+            expr=BinExpr(
+                children=[
+                    'plus',
+                    Var(var=j, symtab=node.symtab),
+                    Var(var=e, symtab=node.symtab)
+                ],
+                symtab=node.symtab
+            ),
+            symtab=node.symtab
+        )
+
+        #e=0
+        inner_init = AssignStat(
+            target=e,
+            offset=None,
+            expr=Const(value=0, symtab=node.symtab),
+            symtab=node.symtab
+        )
+
+        #e<k
+        inner_cond = BinExpr(
+            children=[
+                'lss',
+                Var(var=e, symtab=node.symtab),
+                Const(value=4, symtab=node.symtab)
+            ],
+            symtab=node.symtab
+        )
+
+        #e++
+        inner_step = AssignStat(
+            target=e,
+            offset=None,
+            expr=BinExpr(
+                children=[
+                    'plus',
+                    Var(var=e, symtab=node.symtab),
+                    Const(value=1, symtab=node.symtab)
+                ],
+                symtab=node.symtab
+            ),
+            symtab=node.symtab
+        )
+
+        #save old body
+        old_body = node.body
+
+        #j->idx
+        replace_var(old_body,j,idx)
+
+        #for inner body
+        inner_body = StatList(
+            children = [
+                idx_assign,
+                old_body
+            ],
+            symtab = node.symtab
+        )
+        idx_assign.parent = inner_body
+        old_body.parent = inner_body
+
+        inner_for = ForStat(
+            init=inner_init,
+            cond=inner_cond,
+            step=inner_step,
+            body=inner_body,
+            loop_var=e,
+            limit_expr=Const(value=4, symtab=node.symtab),
+            symtab=node.symtab
+        )
+
+        #j=j+k
+        out_step = AssignStat(
+            target=j,
+            offset=None,
+            expr=BinExpr(
+                children=[
+                    'plus',
+                    Var(var=j, symtab=node.symtab),
+                    Const(value=4,symtab=node.symtab)
+                ],
+                symtab=node.symtab
+            ),
+            symtab=node.symtab
+        )
+
+        node.step=out_step
+        out_step.parent=node
+        node.body=inner_for
+        inner_for.parent=node
 
 class AssignStat(Stat):
     def __init__(self, parent=None, target=None, offset=None, expr=None, symtab=None):
