@@ -26,6 +26,7 @@ def compile_program(text):
 
     #res.navigate(unrolling)
     res.navigate(loopTiling)
+    res.navigate(parallelize_inner_for)
     res.navigate(lowering)
 
     node_list = get_node_list(res)

@@ -275,8 +275,10 @@ def storestat_codegen(self, regalloc):
     else:
         desttype = self.dest.stype
     typeid = ['b', 'h', None, ''][desttype.size // 8 - 1]
+    '''
     if typeid != '' and 'unsigned' in desttype.qual_list:
         typeid = 's' + type
+    '''
 
     res += regalloc.gen_spill_load_if_necessary(self.symbol)
     rsrc = regalloc.get_register_for_variable(self.symbol)
@@ -307,9 +309,10 @@ def loadstat_codegen(self, regalloc):
     else:
         desttype = self.symbol.stype
     typeid = ['b', 'h', None, ''][desttype.size // 8 - 1]
+    '''
     if typeid != '' and 'unsigned' in desttype.qual_list:
         typeid = 's' + type
-
+    '''
     rdst = regalloc.get_register_for_variable(self.dest)
     res += '\tldr' + typeid + ' ' + rdst + ', ' + src + '\n'
     res += regalloc.gen_spill_store_if_necessary(self.dest)
@@ -360,6 +363,102 @@ def unarystat_codegen(self, regalloc):
 
 UnaryStat.codegen = unarystat_codegen
 
+def load_address_of_symbol(sym, rd):
+    '''
+    把数组 base address 放进 rd
+    返回 [code, trail]
+    '''
+    res = ''
+    trail = ''
+    ai = sym.allocinfo
+
+    if type(ai) is LocalSymbolLayout:
+        off = ai.fpreloff
+        if off > 0:
+            res += '\tadd ' + rd + ', ' + get_register_string(REG_FP) + ', #' + repr(off) + '\n'
+        else:
+            res += '\tsub ' + rd + ', ' + get_register_string(REG_FP) + ', #' + repr(-off) + '\n'
+    else:
+        lab, tmp = new_local_const(ai.symname)
+        trail += tmp
+        res += '\tldr ' + rd + ', ' + lab + '\n'
+
+    return [res, trail]
+
+def load_value_of_symbol(sym, rd):
+
+    '''
+    把普通变量的 value 放进 rd
+    这里用来 load j
+    返回 [code, tail]
+    '''
+    res = ''
+    trail = ''
+    ai = sym.allocinfo
+
+    if type(ai) is LocalSymbolLayout:
+        res += '\tldr ' + rd + ',[' + get_register_string(REG_FP) + ', #' + ai.symname + ']\n'
+    else:
+        lab, tmp = new_local_const(ai.symname)
+        trail += tmp
+        res += '\tldr ' + get_register_string(REG_SCRATCH) + ', ' + lab + '\n'
+        res += '\tldr ' + rd + ', [' + get_register_string(REG_SCRATCH) + ']\n'
+
+    return [res, trail]
+
+def vecaddstore_codegen(self, regalloc):
+    '''
+    生成：
+        A[j:j+4] = B[j:j+4] + A[j:j+4]
+    使用 ARMv6 SIMD：
+        uadd8
+    '''
+    used_regs=[0,1,2,3,4,5,6,REG_SCRATCH]
+
+    res=save_regs(used_regs)
+    trail = ''
+
+    rA = get_register_string(0)
+    rB = get_register_string(1)
+    rC = get_register_string(2)
+    rJ = get_register_string(3)
+    rVB = get_register_string(4)
+    rVC = get_register_string(5)
+    rVR = get_register_string(6)
+
+    #rA = &A
+    code, extra = load_address_of_symbol(self.dest_arr, rA)
+    res += code
+    trail += extra
+    #rB = &B
+    code, extra = load_address_of_symbol(self.srca_arr, rB)
+    res += code
+    trail += extra
+    #rC = &C
+    code, extra = load_address_of_symbol(self.srcb_arr, rC)
+    res += code
+    trail += extra
+    #rJ = j
+    code, extra = load_value_of_symbol(self.index_sym, rJ)
+    res += code
+    trail += extra
+    #uchar element size = 1，所以offset就是j
+    res += '\tadd ' + rA + ', ' + rA + ', ' + rJ + '\n'
+    res += '\tadd ' + rB + ', ' + rB + ', ' + rJ + '\n'
+    res += '\tadd ' + rC + ', ' + rC + ', ' + rJ + '\n'
+    #load 4个 uchar
+    res += '\tldr ' + rVB + ', [' + rB + ']\n'
+    res += '\tldr ' + rVC + ', [' + rC + ']\n'
+    #SIMD:一次做4各byte加法
+    res += '\tuadd8 ' + rVR + ', ' + rVB + ', ' + rVC + '\n'
+    # store 4个uchar
+    res += '\tstr ' + rVR + ', [' + rA + ']\n'
+
+    res += restore_regs(used_regs)
+
+    return [res, trail]
+
+VecAddStore.codegen = vecaddstore_codegen
 
 def generate_code(program, regalloc):
     res = '\t.text\n'

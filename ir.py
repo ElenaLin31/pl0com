@@ -702,6 +702,158 @@ def loopTiling(node):
         node.body=inner_for
         inner_for.parent=node
 
+def is_uchar_array(sym):
+    return(
+        isinstance(sym.stype, ArrayType)
+        and sym.stype.basetype.name == 'uchar'
+    )
+
+def try_make_vecaddstore(old_body, idx, j, symtab):
+    '''
+    识别:
+        A[idx] = B[idx] + C[idx]
+    成功返回 VecAddStore
+    失败返回None
+    '''
+
+    if isinstance(old_body, StatList):
+        if len(old_body.children) != 1:
+            return None
+        old_body = old_body.children[0]
+
+    if not isinstance(old_body, AssignStat):
+        return None
+
+    if old_body.offset is None:
+        return None
+
+    if not is_uchar_array(old_body.symbol):
+        return None
+
+    rhs = old_body.expr
+
+    if not isinstance(rhs, BinExpr):
+        return None
+
+    if rhs.children[0] != 'plus':
+        return None
+
+    left = rhs.children[1]
+    right = rhs.children[2]
+
+    if not isinstance(left, ArrayElement):
+        return None
+
+    if not isinstance(right, ArrayElement):
+        return None
+
+    if not is_uchar_array(left.symbol):
+        return None
+
+    if not is_uchar_array(right.symbol):
+        return None
+
+    return VecAddStore(
+        dest_arr = old_body.symbol,
+        srca_arr = left.symbol,
+        srcb_arr = right.symbol,
+        index_sym = j,
+        symtab = symtab
+    )
+
+def parallelize_inner_for(node):
+    print("parallelize_inner_for called on", type(node))
+    '''
+    找 loopTiling 产生的 inner_for:
+    替换成:
+    old_body(j+0)
+    old_body(j+1)
+    old_body(j+2)
+    old_body(j+3)
+    '''
+
+    if not isinstance(node, ForStat):
+        return
+
+    e=node.loop_var
+
+    if not is_const(node.limit_expr, 4):
+        print("skip: limit_expr is not Const(4)")
+        return
+
+    if not isinstance(node.body, StatList):
+        print("skip: body is not StatList")
+        return
+
+    if len(node.body.children) != 2:
+        print("skip: body children len is not 2")
+        return
+
+    idx_assign = node.body.children[0]
+    old_body = node.body.children[1]
+
+    if not isinstance(idx_assign, AssignStat):
+        return
+
+    idx = idx_assign.symbol
+
+    if not isinstance(idx_assign.expr, BinExpr):
+        return
+
+    if idx_assign.expr.children[0] != 'plus':
+        return
+
+    left = idx_assign.expr.children[1]
+    right = idx_assign.expr.children[2]
+
+    if isinstance(left, Var) and isinstance(right, Var) and right.symbol is e:
+        j = left.symbol
+
+    elif isinstance(left, Var) and isinstance(right, Var) and left.symbol is e:
+        j = right.symbol
+
+    else:
+        return
+
+    print("parallelize_inner_for: found tiled inner loop")
+
+    vec_node = try_make_vecaddstore(old_body, idx, j, node.symtab)
+
+    if vec_node is not None:
+        print("parallelize_inner_for: replaced inner loop by VecAddStore")
+        node.parent.replace(node, vec_node)
+        return
+
+    #创建一个空 list，用来放 4 份展开后的 body。
+    lanes = []
+
+    #循环 4 次
+    for lane in range(4):
+        replacement = make_j_plus_lane(j, lane, node.symtab)
+
+        #复制 old_body，并把 idx 换成 j+0/j+1/j+2/j+3
+        lane_body = clone_stat_replace_var(
+            stat = old_body,
+            old_sym = idx,
+            new_expr = replacement,
+            symtab = node.symtab
+        )
+
+        #把刚复制出来的那一份 body 放进 lanes
+        lanes.append(lane_body)
+
+    #这一步把 4 个 old_body 的 copy 包成一个 StatList
+    parallel_body = StatList(
+        children=lanes,
+        symtab=node.symtab
+    )
+
+    parallel_body.parallel = True
+
+    node.parent.replace(node, parallel_body)
+
+    print("parallelize_inner_for: replaced inner loop by 4 lanes")
+
 class AssignStat(Stat):
     def __init__(self, parent=None, target=None, offset=None, expr=None, symtab=None):
         super().__init__(parent, [], symtab)
@@ -1072,6 +1224,44 @@ class StatList(Stat):  # low-level node
                 pass
         return None
 
+'''
+这个node的意思是：
+不要再把它拆成LoadStat/BinStat/StoreStat
+这个node后面直接由codegen变成ARM SIMD指令
+'''
+class VecAddStore(Stat):
+    '''
+    表示:
+        A[j : j+4] = B[j : j+4] + C[j : j+4]
+    第一版只支持 uchar array，width = 4。
+    '''
+    def __init__(self, parent=None, dest_arr=None, srca_arr=None, srcb_arr=None, index_sym=None, width=4, symtab=None):
+        super().__init__(parent, [], symtab)
+        self.dest_arr = dest_arr
+        self.srca_arr = srca_arr
+        self.srcb_arr = srcb_arr
+        self.index_sym = index_sym
+        self.width = width
+
+    def collect_uses(self):
+        return [self.srca_arr, self.srcb_arr, self.index_sym]
+
+    def collect_kills(self):
+        return [self.dest_arr]
+
+    def lower(self):
+        return False
+
+    def human_repr(self):
+        return (
+            "vecaddstore"
+            + self.dest_arr.name + "["
+            + self.index_sym.name + ":"
+            + self.index_sym.name + "+" + repr(self.width)
+            + "] <-"
+            + self.srca_arr.name + "+"
+            + self.srcb_arr.name
+        )
 
 class Block(Stat):
     def __init__(self, parent=None, gl_sym=None, lc_sym=None, defs=None, body=None):
@@ -1120,3 +1310,97 @@ def print_stat_list(node):
         for n in node.children:
             print(id(n), end=' ')
         print(']')
+
+def is_const(node, value=None):
+    if not isinstance(node, Const):
+        return False
+    if value is None:
+        return True
+    return node.value == value
+
+def is_var(node,sym):
+    return isinstance(node, Var) and node.symbol is sym
+
+def make_j_plus_lane(j, lane, symtab):
+
+    if lane == 0:
+        return Var(var=j,symtab=symtab)
+
+    return BinExpr(
+        children=[
+            'plus',
+            Var(var=j, symtab=symtab),
+            Const(value=lane, symtab=symtab)
+        ],
+        symtab=symtab
+    )
+
+def clone_expr_replace_var(expr, old_sym, new_expr, symtab):
+
+    #复制 expr
+    #如果遇到 Var(old_sym)，就替换成 new_expr
+
+    if isinstance(expr, Const):
+        return Const(value=expr.value, symb=expr.symbol, symtab=symtab)
+
+    if isinstance(expr, Var):
+        if expr.symbol is old_sym:
+            return clone_expr_replace_var(new_expr, old_sym=None, new_expr=None, symtab=symtab)
+        return Var(var=expr.symbol, symtab=symtab)
+
+    if isinstance(expr, ArrayElement):
+        return ArrayElement(
+            var=expr.symbol,
+            offset=clone_expr_replace_var(expr.offset, old_sym, new_expr, symtab),
+            symtab=symtab
+        )
+
+    if isinstance(expr, BinExpr):
+        return BinExpr(
+            children=[
+                expr.children[0],
+                clone_expr_replace_var(expr.children[1], old_sym, new_expr, symtab),
+                clone_expr_replace_var(expr.children[2], old_sym, new_expr, symtab)
+            ],
+            symtab=symtab
+        )
+
+    if isinstance(expr, UnExpr):
+        return UnExpr(
+            children=[
+                expr.children[0],
+                clone_expr_replace_var(expr.children[1], old_sym, new_expr, symtab),
+            ],
+            symtab=symtab
+        )
+
+    raise RuntimeError("clone_expr_replace_var: unsupported expr" + repr(type(expr)))
+
+def clone_stat_replace_var(stat, old_sym, new_expr, symtab):
+
+    # 复制 statement
+    # 如果里面出现 Var(old_sym), 替换成 new_expr
+
+    if isinstance(stat, AssignStat):
+        new_offset = None
+        if stat.offset is not None:
+            new_offset = clone_expr_replace_var(stat.offset, old_sym, new_expr, symtab)
+
+        return AssignStat(
+            target=stat.symbol,
+            offset=new_offset,
+            expr=clone_expr_replace_var(stat.expr, old_sym, new_expr, symtab),
+            symtab=symtab
+        )
+
+    if isinstance(stat, StatList):
+        new_children = []
+        for c in stat.children:
+            new_children.append(clone_stat_replace_var(c, old_sym, new_expr, symtab))
+
+        return StatList(
+            children=new_children,
+            symtab=symtab
+        )
+
+    raise RuntimeError("clone_stat_replace_var: unsupported stat" + repr(type(stat)))
